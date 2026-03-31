@@ -43,6 +43,7 @@ const (
 	TkMod
 	TkArray
 	TkOf
+	TkRecord
 	// Types.
 	TkInteger
 	TkString
@@ -126,6 +127,7 @@ var keywords = map[string]TokenKind{
 	"mod":       TkMod,
 	"array":     TkArray,
 	"of":        TkOf,
+	"record":    TkRecord,
 	"true":      TkTrue,
 	"false":     TkFalse,
 	"integer":   TkInteger,

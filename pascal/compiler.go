@@ -57,8 +57,16 @@ func (c *Compiler) Compile() []Diagnostic {
 
 // ---- grammar ----
 
+// typeDesc carries type information produced by the type-parsing helpers.
+type typeDesc struct {
+	Kind    TypeKind
+	Size    int // bytes (8 for scalars)
+	ArrInfo *ArrayInfo
+	RecInfo *RecordInfo
+}
+
 func (c *Compiler) parseProgram() {
-	// program = "program" IDENT ";" [uses_clause] [const_section] [var_section]
+	// program = "program" IDENT ";" [uses] [const] [type] [var]
 	//           {proc_or_func} block "."
 	c.expect(TkProgram)
 	c.expect(TkIdent)
@@ -67,15 +75,21 @@ func (c *Compiler) parseProgram() {
 	if c.tok.Kind == TkUses {
 		c.parseUses()
 	}
-	if c.tok.Kind == TkConst {
-		c.parseConst()
+	for {
+		switch c.tok.Kind {
+		case TkConst:
+			c.parseConst()
+		case TkType:
+			c.parseTypeSection()
+		case TkVar:
+			c.parseVarSection()
+		case TkProcedure, TkFunction:
+			c.parseProcOrFunc()
+		default:
+			goto doneDecls
+		}
 	}
-	if c.tok.Kind == TkVar {
-		c.parseVarSection()
-	}
-	for c.tok.Kind == TkProcedure || c.tok.Kind == TkFunction {
-		c.parseProcOrFunc()
-	}
+doneDecls:
 	// Main body.
 	frameSize := c.scope.FrameSize()
 	c.gen.SetMainEntry(c.gen.CurrentAddr())
@@ -111,7 +125,10 @@ func (c *Compiler) parseConst() {
 			sym := &Symbol{Name: name, Kind: SymConst, Type: TypeInteger, Value: val}
 			c.scope.Declare(sym)
 		case TkStr:
-			c.consume() // string constants ignored for now
+			val := c.tok.StrVal
+			c.consume()
+			sym := &Symbol{Name: name, Kind: SymConst, Type: TypeString, StrConst: val}
+			c.scope.Declare(sym)
 		case TkTrue:
 			c.consume()
 			sym := &Symbol{Name: name, Kind: SymConst, Type: TypeBoolean, Value: 1}
@@ -136,37 +153,162 @@ func (c *Compiler) parseVarSection() {
 		c.consume()
 		for c.tok.Kind == TkComma {
 			c.consume()
-			names = append(names, c.tok.StrVal)
-			c.expect(TkIdent)
+			if c.tok.Kind == TkIdent {
+				names = append(names, c.tok.StrVal)
+				c.consume()
+			}
 		}
 		c.expect(TkColon)
-		typ := c.parseType()
+		td := c.parseFullType()
 		c.expect(TkSemi)
 		for _, name := range names {
-			c.scope.DeclareVar(name, typ)
+			if c.scope.LookupLocal(name) != nil {
+				c.errorf("duplicate declaration: " + name)
+				continue
+			}
+			sym := c.scope.DeclareVarSized(name, td.Kind, td.Size)
+			sym.ArrInfo = td.ArrInfo
+			sym.RecInfo = td.RecInfo
 		}
 	}
 }
 
 func (c *Compiler) parseType() TypeKind {
+	return c.parseFullType().Kind
+}
+
+// parseFullType parses any type (simple, array, record, or named) and returns
+// a typeDesc carrying size and optional ArrayInfo/RecordInfo.
+func (c *Compiler) parseFullType() typeDesc {
 	switch c.tok.Kind {
 	case TkInteger:
 		c.consume()
-		return TypeInteger
+		return typeDesc{Kind: TypeInteger, Size: 8}
 	case TkString:
 		c.consume()
-		return TypeString
+		return typeDesc{Kind: TypeString, Size: 8}
 	case TkBoolean:
 		c.consume()
-		return TypeBoolean
+		return typeDesc{Kind: TypeBoolean, Size: 8}
 	case TkChar:
 		c.consume()
-		return TypeChar
+		return typeDesc{Kind: TypeChar, Size: 8}
+	case TkArray:
+		c.consume() // "array"
+		c.expect(TkLBrack)
+		lowTok := c.tok
+		c.expect(TkInt)
+		c.expect(TkDotDot)
+		highTok := c.tok
+		c.expect(TkInt)
+		c.expect(TkRBrack)
+		c.expect(TkOf)
+		elemTd := c.parseFullType()
+		ai := &ArrayInfo{
+			ElemType: elemTd.Kind,
+			Low:      int(lowTok.IntVal),
+			High:     int(highTok.IntVal),
+		}
+		count := ai.High - ai.Low + 1
+		if count < 0 {
+			count = 0
+		}
+		return typeDesc{Kind: TypeArray, Size: count * 8, ArrInfo: ai}
+	case TkRecord:
+		return c.parseRecordType()
+	case TkIdent:
+		name := c.tok.StrVal
+		c.consume()
+		sym := c.scope.Lookup(name)
+		if sym == nil || sym.Kind != SymType {
+			c.errorf("unknown type: " + name)
+			return typeDesc{Kind: TypeUnknown, Size: 8}
+		}
+		size := 8
+		if sym.RecInfo != nil {
+			size = sym.RecInfo.Size
+		} else if sym.ArrInfo != nil {
+			count := sym.ArrInfo.High - sym.ArrInfo.Low + 1
+			if count < 0 {
+				count = 0
+			}
+			size = count * 8
+		}
+		return typeDesc{Kind: sym.Type, Size: size, ArrInfo: sym.ArrInfo, RecInfo: sym.RecInfo}
 	default:
 		c.errorf("expected type")
 		c.consume()
-		return TypeUnknown
+		return typeDesc{Kind: TypeUnknown, Size: 8}
 	}
+}
+
+// parseTypeSection parses a "type" declaration block.
+func (c *Compiler) parseTypeSection() {
+	c.consume() // "type"
+	for c.tok.Kind == TkIdent {
+		name := c.tok.StrVal
+		c.consume()
+		c.expect(TkEq)
+		td := c.parseFullType()
+		c.expect(TkSemi)
+		sym := &Symbol{
+			Name:    name,
+			Kind:    SymType,
+			Type:    td.Kind,
+			ArrInfo: td.ArrInfo,
+			RecInfo: td.RecInfo,
+		}
+		c.scope.Declare(sym)
+	}
+}
+
+// parseRecordType parses "record field_list end" and returns its typeDesc.
+func (c *Compiler) parseRecordType() typeDesc {
+	c.consume() // "record"
+	ri := &RecordInfo{}
+	fieldOffset := 0
+	for c.tok.Kind == TkIdent {
+		var fieldNames []string
+		fieldNames = append(fieldNames, c.tok.StrVal)
+		c.consume()
+		for c.tok.Kind == TkComma {
+			c.consume()
+			if c.tok.Kind == TkIdent {
+				fieldNames = append(fieldNames, c.tok.StrVal)
+				c.consume()
+			}
+		}
+		c.expect(TkColon)
+		td := c.parseFullType()
+		for _, fn := range fieldNames {
+			ri.Fields = append(ri.Fields, RecordField{
+				Name:   fn,
+				Type:   td.Kind,
+				Offset: fieldOffset,
+			})
+			fieldOffset += 8
+		}
+		if c.tok.Kind == TkSemi {
+			c.consume()
+		}
+	}
+	c.expect(TkEnd)
+	ri.Size = fieldOffset
+	if ri.Size == 0 {
+		ri.Size = 8 // minimum size
+	}
+	return typeDesc{Kind: TypeRecord, Size: ri.Size, RecInfo: ri}
+}
+
+// findField looks up a field by name in RecordInfo (case-insensitive).
+func findField(ri *RecordInfo, name string) *RecordField {
+	lname := toLower(name)
+	for i := range ri.Fields {
+		if toLower(ri.Fields[i].Name) == lname {
+			return &ri.Fields[i]
+		}
+	}
+	return nil
 }
 
 func (c *Compiler) parseProcOrFunc() {
@@ -180,12 +322,17 @@ func (c *Compiler) parseProcOrFunc() {
 	c.scope = NewScope(outer)
 	c.scope.nextOffset = -8
 
-	// Parameters.
-	paramOffset := 16 // first param at [rbp+16] (SysV ABI: after saved rbp+ret addr)
+	// Collect parameters first, then assign offsets in reverse so that
+	// left-to-right call-site argument pushing matches declaration order.
+	// (First arg is pushed first → ends up deepest on stack → highest rbp offset.)
+	type paramEntry struct {
+		name string
+		typ  TypeKind
+	}
+	var allParams []paramEntry
 	if c.tok.Kind == TkLParen {
 		c.consume()
 		for c.tok.Kind != TkRParen {
-			// param_group: ident_list ":" type
 			var pnames []string
 			pnames = append(pnames, c.tok.StrVal)
 			c.consume()
@@ -197,8 +344,7 @@ func (c *Compiler) parseProcOrFunc() {
 			c.expect(TkColon)
 			typ := c.parseType()
 			for _, pname := range pnames {
-				c.scope.DeclareParam(pname, typ, paramOffset)
-				paramOffset += 8
+				allParams = append(allParams, paramEntry{pname, typ})
 			}
 			if c.tok.Kind == TkSemi {
 				c.consume()
@@ -206,29 +352,36 @@ func (c *Compiler) parseProcOrFunc() {
 		}
 		c.expect(TkRParen)
 	}
+	// Assign offsets: first declared param gets the highest positive rbp offset,
+	// last declared param gets rbp+16 (immediately above saved-rbp+ret-addr).
+	for i, p := range allParams {
+		offset := 16 + (len(allParams)-1-i)*8
+		c.scope.DeclareParam(p.name, p.typ, offset)
+	}
 
-	// Return type for functions (stored as a local var at [rbp-8] by convention).
+	// Return type for functions (result stored as first local var at [rbp-8]).
 	var retType TypeKind
+	resultVarOffset := -8
 	if isFunc && c.tok.Kind == TkColon {
 		c.consume()
 		retType = c.parseType()
-		// Declare an implicit result var with the function's name.
-		c.scope.DeclareVar(name, retType)
+		resSym := c.scope.DeclareVar(name, retType)
+		resultVarOffset = resSym.Offset
 	}
-	_ = retType
 	c.expect(TkSemi)
 
-	if c.tok.Kind == TkConst {
-		c.parseConst()
-	}
-	if c.tok.Kind == TkVar {
-		c.parseVarSection()
+	for c.tok.Kind == TkConst || c.tok.Kind == TkVar {
+		switch c.tok.Kind {
+		case TkConst:
+			c.parseConst()
+		case TkVar:
+			c.parseVarSection()
+		}
 	}
 
 	// Record procedure address.
 	addr := c.gen.CurrentAddr()
 	c.procAddrs[toLower(name)] = addr
-	// Declare proc in outer scope.
 	sym := &Symbol{Name: name, Kind: SymProc, Type: TypeVoid, Offset: addr}
 	if isFunc {
 		sym.Kind = SymFunc
@@ -239,6 +392,10 @@ func (c *Compiler) parseProcOrFunc() {
 	frameSize := c.scope.FrameSize()
 	c.gen.EmitProcEntry(frameSize)
 	c.parseBlock()
+	if isFunc {
+		// Ensure the result variable is in rax before returning.
+		c.gen.EmitLoadVar(resultVarOffset)
+	}
 	c.gen.EmitProcReturn()
 	c.expect(TkSemi)
 
@@ -336,13 +493,7 @@ func (c *Compiler) parseIdentStatement() {
 		}
 		c.gen.EmitCallProc(sym.Offset)
 		if len(args) > 0 {
-			// add rsp, N  to clean up pushed args.
-			// We emit this inline since CodeGen doesn't have a special method.
-			// For now, the x86_64 codegen's EmitCallProc doesn't handle this.
-			// TODO: emit stack cleanup. For the simple Pascal subset in this
-			// implementation we handle built-ins explicitly, and for user procs
-			// we'll use the args-on-stack approach.
-			_ = args
+			c.emitStackCleanup(len(args) * 8)
 		}
 		return
 	}
@@ -353,14 +504,47 @@ func (c *Compiler) parseIdentStatement() {
 		return
 	}
 
-	// Assignment.
+	// Array element assignment: a[i] := expr
+	if sym.Type == TypeArray && c.tok.Kind == TkLBrack && sym.ArrInfo != nil {
+		adjustedBase := sym.Offset + sym.ArrInfo.Low*8
+		c.emitLoadAddr(adjustedBase)     // rax = rbp + adjustedBase (base addr)
+		c.gen.EmitPush()                 // push base (lhs for final subtraction)
+		c.consume()                      // consume '['
+		c.parseExpr()                    // index → rax
+		c.gen.EmitPush()                 // push index (lhs for multiply)
+		c.gen.EmitLoadInt(8)             // rax = 8
+		c.gen.EmitBinaryOp(TkStar)      // pop index, rax = index * 8
+		c.gen.EmitBinaryOp(TkMinus)     // pop base, rax = base - index*8
+		c.expect(TkRBrack)
+		// rax = &a[index]
+		c.gen.EmitPush() // save element address
+		c.expect(TkAssign)
+		c.parseExpr() // value → rax
+		c.emitPopRcxAndStore()
+		return
+	}
+
+	// Record field assignment: p.field := expr
+	if sym.Type == TypeRecord && c.tok.Kind == TkDot && sym.RecInfo != nil {
+		c.consume() // consume '.'
+		fieldName := c.tok.StrVal
+		fieldLine, fieldCol := c.tok.Line, c.tok.Col
+		c.expect(TkIdent)
+		field := findField(sym.RecInfo, fieldName)
+		if field == nil {
+			c.diagAt(fieldLine, fieldCol, "unknown field: "+fieldName)
+			return
+		}
+		c.expect(TkAssign)
+		c.parseExpr()
+		c.gen.EmitStoreVar(sym.Offset - field.Offset)
+		return
+	}
+
+	// Simple assignment.
 	c.expect(TkAssign)
 	c.parseExpr()
-	if sym.Kind == SymParam {
-		c.gen.EmitStoreVar(sym.Offset)
-	} else {
-		c.gen.EmitStoreVar(sym.Offset)
-	}
+	c.gen.EmitStoreVar(sym.Offset)
 }
 
 func (c *Compiler) parseWrite(newline bool) {
@@ -498,15 +682,7 @@ func (c *Compiler) parseFor() {
 	p := c.gen.EmitJumpFalse()
 	c.expect(TkDo)
 	c.parseStatement()
-	// Increment/decrement var.
-	c.gen.EmitLoadVar(sym.Offset)
-	if downto {
-		c.gen.EmitLoadInt(-1)
-		c.gen.EmitPush() // -1 on stack, but EmitBinaryOp pops lhs... swap needed
-		// Actually: rax = var, emit push, load -1 into rax, then EmitBinaryOp(TkPlus)?
-		// Let's do it differently: load var, push, load 1, subtract.
-	}
-	// Load 1, push var, add (or subtract).
+	// Increment or decrement the loop variable.
 	c.gen.EmitLoadVar(sym.Offset)
 	c.gen.EmitPush()
 	if downto {
@@ -665,16 +841,22 @@ func (c *Compiler) parseFactor() TypeKind {
 			return TypeUnknown
 		}
 		if sym.Kind == SymConst {
-			c.gen.EmitLoadInt(sym.Value)
+			if sym.Type == TypeString {
+				c.gen.EmitLoadStr(sym.StrConst)
+			} else {
+				c.gen.EmitLoadInt(sym.Value)
+			}
 			return sym.Type
 		}
 		if sym.Kind == SymFunc {
 			// Function call as expression.
+			nArgs := 0
 			if c.tok.Kind == TkLParen {
 				c.consume()
 				for c.tok.Kind != TkRParen {
 					c.parseExpr()
 					c.gen.EmitPush()
+					nArgs++
 					if c.tok.Kind == TkComma {
 						c.consume()
 					}
@@ -682,8 +864,40 @@ func (c *Compiler) parseFactor() TypeKind {
 				c.expect(TkRParen)
 			}
 			c.gen.EmitCallProc(sym.Offset)
-			// Result is in rax (from [rbp-8] of the called function... simplified).
+			if nArgs > 0 {
+				c.emitStackCleanup(nArgs * 8)
+			}
 			return sym.Type
+		}
+		// Array element read: a[i]
+		if sym.Type == TypeArray && c.tok.Kind == TkLBrack && sym.ArrInfo != nil {
+			ai := sym.ArrInfo
+			adjustedBase := sym.Offset + ai.Low*8
+			c.emitLoadAddr(adjustedBase) // rax = base
+			c.gen.EmitPush()             // push base
+			c.consume()                  // '['
+			c.parseExpr()                // index → rax
+			c.gen.EmitPush()             // push index
+			c.gen.EmitLoadInt(8)         // rax = 8
+			c.gen.EmitBinaryOp(TkStar)  // rax = index * 8
+			c.gen.EmitBinaryOp(TkMinus) // rax = base - index*8 = &a[index]
+			c.expect(TkRBrack)
+			c.emitLoadFromAddr() // rax = a[index]
+			return ai.ElemType
+		}
+		// Record field read: p.field
+		if sym.Type == TypeRecord && c.tok.Kind == TkDot && sym.RecInfo != nil {
+			c.consume() // '.'
+			fieldName := c.tok.StrVal
+			fieldLine, fieldCol := c.tok.Line, c.tok.Col
+			c.expect(TkIdent)
+			field := findField(sym.RecInfo, fieldName)
+			if field == nil {
+				c.diagAt(fieldLine, fieldCol, "unknown field: "+fieldName)
+				return TypeUnknown
+			}
+			c.gen.EmitLoadVar(sym.Offset - field.Offset)
+			return field.Type
 		}
 		// Variable load.
 		c.gen.EmitLoadVar(sym.Offset)
@@ -764,6 +978,22 @@ func (c *Compiler) emitForCmp(downto bool) {
 	}
 	if fc, ok := c.gen.(forCmper); ok {
 		fc.EmitForCmp(downto)
+	}
+}
+
+// emitLoadFromAddr emits code to load [rax] into rax (indirect load).
+func (c *Compiler) emitLoadFromAddr() {
+	type loader interface{ EmitLoadFromAddr() }
+	if l, ok := c.gen.(loader); ok {
+		l.EmitLoadFromAddr()
+	}
+}
+
+// emitPopRcxAndStore pops the saved address into rcx and stores rax there.
+func (c *Compiler) emitPopRcxAndStore() {
+	type storer interface{ EmitPopRcxAndStore() }
+	if s, ok := c.gen.(storer); ok {
+		s.EmitPopRcxAndStore()
 	}
 }
 

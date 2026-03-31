@@ -787,6 +787,17 @@ func (g *CodeGen) EmitForCmp(downto bool) {
 	g.emit(0x48, 0x0F, 0xB6, 0xC0)
 }
 
+// EmitLoadFromAddr loads the 64-bit value at [rax] into rax.
+func (g *CodeGen) EmitLoadFromAddr() {
+	g.emit(0x48, 0x8B, 0x00) // mov rax, [rax]
+}
+
+// EmitPopRcxAndStore pops the saved address into rcx, then stores rax to [rcx].
+func (g *CodeGen) EmitPopRcxAndStore() {
+	g.emit(0x59)             // pop rcx
+	g.emit(0x48, 0x89, 0x01) // mov [rcx], rax
+}
+
 // EmitAddRSP emits: add rsp, n (for caller stack cleanup after proc calls).
 func (g *CodeGen) EmitAddRSP(n int) {
 	if n == 0 {

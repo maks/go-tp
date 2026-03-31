@@ -121,3 +121,302 @@ end.`
 		t.Fatalf("unexpected diagnostics: %v", diags)
 	}
 }
+
+func TestCompilerArray(t *testing.T) {
+	src := `program test;
+var a: array[1..5] of integer;
+begin
+  a[1] := 42;
+  a[3] := a[1] + 1;
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerRecord(t *testing.T) {
+	src := `program test;
+type Point = record x: integer; y: integer; end;
+var p: Point;
+begin
+  p.x := 10;
+  p.y := 20;
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerRecordReadField(t *testing.T) {
+	src := `program test;
+type Pair = record a: integer; b: integer; end;
+var p: Pair;
+var s: integer;
+begin
+  p.a := 3;
+  p.b := 4;
+  s := p.a + p.b;
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerArrayInlineVar(t *testing.T) {
+	src := `program test;
+var nums: array[0..9] of integer;
+    i: integer;
+begin
+  i := 0;
+  nums[i] := 99;
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerFor(t *testing.T) {
+	src := `program test;
+var i: integer;
+begin
+  for i := 1 to 5 do writeln(i);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerForDownto(t *testing.T) {
+	src := `program test;
+var i: integer;
+begin
+  for i := 5 downto 1 do writeln(i);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerConst(t *testing.T) {
+	src := `program test;
+const N = 42;
+begin
+  writeln(N);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+	found := false
+	for _, op := range gen.ops {
+		if op == "loadint" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected loadint for const, not found in ops")
+	}
+}
+
+func TestCompilerFunction(t *testing.T) {
+	src := `program test;
+function double(x: integer): integer;
+begin
+  double := x * 2;
+end;
+var r: integer;
+begin
+  r := double(5);
+  writeln(r);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerProcedureParams(t *testing.T) {
+	src := `program test;
+procedure printSum(a: integer; b: integer);
+begin
+  writeln(a + b);
+end;
+begin
+  printSum(3, 4);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerExit(t *testing.T) {
+	src := `program test;
+procedure maybeExit(x: integer);
+begin
+  if x = 0 then exit;
+  writeln(x);
+end;
+begin
+  maybeExit(0);
+  maybeExit(1);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerDivMod(t *testing.T) {
+	src := `program test;
+var a, b, c: integer;
+begin
+  a := 10;
+  b := 3;
+  c := a div b;
+  writeln(c);
+  c := a mod b;
+  writeln(c);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerBooleanOps(t *testing.T) {
+	src := `program test;
+var x: boolean;
+begin
+  x := true or false;
+  x := true and false;
+  x := not true;
+  writeln(x);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerNestedBlock(t *testing.T) {
+	src := `program test;
+var i: integer;
+begin
+  begin
+    i := 1;
+    begin
+      i := i + 1;
+    end;
+  end;
+  writeln(i);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerWriteNoArgs(t *testing.T) {
+	src := `program test;
+begin
+  writeln('before');
+  writeln;
+  writeln('after');
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerUses(t *testing.T) {
+	src := `program test;
+uses crt, sysutils;
+begin
+  writeln('ok');
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerDuplicateDeclError(t *testing.T) {
+	src := `program test;
+var x: integer;
+var x: integer;
+begin end.`
+	gen := &mockGen{}
+	diags := NewCompiler(src, gen).Compile()
+	if len(diags) == 0 {
+		t.Fatal("expected diagnostic for duplicate declaration")
+	}
+}
+
+func TestCompilerConstAssignError(t *testing.T) {
+	src := `program test;
+const N = 5;
+begin
+  N := 10;
+end.`
+	gen := &mockGen{}
+	diags := NewCompiler(src, gen).Compile()
+	if len(diags) == 0 {
+		t.Fatal("expected diagnostic for const assignment")
+	}
+	if !strings.Contains(diags[0].Msg, "constant") {
+		t.Errorf("expected 'constant' in diagnostic, got: %s", diags[0].Msg)
+	}
+}
+
+func TestCompilerTypeSection(t *testing.T) {
+	src := `program test;
+type MyInt = record val: integer; end;
+var r: MyInt;
+begin
+  r.val := 99;
+  writeln(r.val);
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerMultipleConstTypeVar(t *testing.T) {
+	src := `program test;
+const A = 1;
+type Pt = record x: integer; end;
+var p: Pt;
+const B = 2;
+var n: integer;
+begin
+  p.x := A;
+  n := B;
+end.`
+	gen := &mockGen{}
+	if diags := NewCompiler(src, gen).Compile(); len(diags) > 0 {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestCompilerUndefinedField(t *testing.T) {
+	src := `program test;
+type Pt = record x: integer; end;
+var p: Pt;
+begin
+  p.z := 1;
+end.`
+	gen := &mockGen{}
+	diags := NewCompiler(src, gen).Compile()
+	if len(diags) == 0 {
+		t.Fatal("expected diagnostic for unknown field")
+	}
+}
