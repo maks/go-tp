@@ -280,8 +280,8 @@ func TestBuildOutputPath(t *testing.T) {
 		want string
 	}{
 		{"", "/tmp/pascal_out"},
-		{"/home/user/hello.pas", "/tmp/pascal_hello"},
-		{"/home/user/test.pas", "/tmp/pascal_test"},
+		{"/home/user/hello.pas", "/home/user/hello"},
+		{"/home/user/test.pas", "/home/user/test"},
 	}
 	for _, c := range cases {
 		got := buildOutputPath(c.in)

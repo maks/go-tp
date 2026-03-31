@@ -249,8 +249,9 @@ func buildOutputPath(filePath string) string {
 	if filePath == "" {
 		return "/tmp/pascal_out"
 	}
+	dir := filepath.Dir(filePath)
 	base := filepath.Base(filePath)
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
-	return filepath.Join("/tmp", "pascal_"+name)
+	return filepath.Join(dir, name)
 }

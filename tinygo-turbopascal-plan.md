@@ -540,8 +540,8 @@ F9 pressed (CmBuild)
 | **M2** | `Label`+`Button`+`InputLine`+`Dialog` | Modal input dialog |
 | **M3** | `MenuBar`+`MenuBox`+`StatusLine` | Full menu navigation |
 | **M4** | `ScrollBar`+`Editor`+`ListBox` | Text editor window |
-| **M5** | Pascal lexer + compiler + x86-64 codegen | Compile & run hello world from CLI |
-| **M6** | `ide/` integrating all above | Full IDE on Linux with build+run |
+| **M5** ✓ | Pascal lexer + compiler + x86-64 codegen | Compile & run hello world from CLI |
+| **M6** ✓ | `ide/` integrating all above | Full IDE on Linux with build+run |
 
 ### Stage 2 — TinyGo port for RP2040
 
