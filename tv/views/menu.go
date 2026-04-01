@@ -177,8 +177,8 @@ func (mb *MenuBar) closePopup() {
 	mb.selected = -1
 }
 
-// DrawPopup draws the active popup menu box into the desktop buffer.
-// Call this from Application after drawing the desktop.
+// DrawPopup draws the active popup menu box (and any nested child menus)
+// into the full application buffer. Call this after drawing the desktop.
 func (mb *MenuBar) DrawPopup(buf *core.DrawBuffer, offsetX, offsetY int) {
 	if !mb.open || mb.popup == nil {
 		return
@@ -187,6 +187,8 @@ func (mb *MenuBar) DrawPopup(buf *core.DrawBuffer, offsetX, offsetY int) {
 	sub := core.NewDrawBuffer(b.W, b.H, core.AttrMenuBox)
 	mb.popup.Draw(sub)
 	buf.CopyFrom(sub, b.X-offsetX, b.Y-offsetY)
+	// Draw any open nested child popups directly into the full buffer.
+	mb.popup.DrawChildPopup(buf)
 }
 
 // hotLetter returns the hot letter from a label. By convention the first letter
@@ -206,12 +208,15 @@ func hotLetter(label string) rune {
 func menuBoxWidth(items []*MenuItem) int {
 	w := 4 // 2 border + 2 padding
 	for _, item := range items {
-		if item.Cmd == 0 {
-			continue
+		if item.Cmd == 0 && item.SubMenu == nil {
+			continue // pure separator
 		}
 		n := len([]rune(item.Label))
 		if item.HotText != "" {
 			n += len([]rune(item.HotText)) + 2
+		}
+		if item.SubMenu != nil {
+			n += 2 // " ▸" indicator
 		}
 		if n > w-4 {
 			w = n + 4
@@ -228,8 +233,9 @@ type MenuBox struct {
 	ViewBase
 	items     []*MenuItem
 	selected  int
-	chosen    *MenuItem // set when user activates an item
+	chosen    *MenuItem // set when user activates a leaf item
 	cancelled bool
+	child     *MenuBox  // open nested submenu, or nil
 }
 
 // NewMenuBox creates a MenuBox. bounds must include the border.
@@ -252,8 +258,8 @@ func (mb *MenuBox) Draw(buf *core.DrawBuffer) {
 		if y >= h-1 {
 			break
 		}
-		if item.Cmd == 0 {
-			// Separator.
+		if item.Cmd == 0 && item.SubMenu == nil {
+			// Pure separator.
 			buf.MoveChar(1, y, w-2, '─', core.AttrMenuBox)
 			if c := buf.At(0, y); c != nil {
 				c.Ch = '├'
@@ -269,7 +275,10 @@ func (mb *MenuBox) Draw(buf *core.DrawBuffer) {
 		}
 		buf.MoveChar(1, y, w-2, ' ', attr)
 		buf.MoveStr(2, y, item.Label, attr)
-		if item.HotText != "" {
+		if item.SubMenu != nil {
+			// Right-aligned arrow indicator for submenus.
+			buf.MoveStr(w-3, y, "▸", attr)
+		} else if item.HotText != "" {
 			hotStart := w - 2 - len([]rune(item.HotText))
 			if hotStart > 2 {
 				buf.MoveStr(hotStart, y, item.HotText, attr)
@@ -282,19 +291,48 @@ func (mb *MenuBox) HandleEvent(ev *core.Event) {
 	if ev.Handled {
 		return
 	}
+
+	// Route to child submenu first.
+	if mb.child != nil {
+		mb.child.HandleEvent(ev)
+		if mb.child.chosen != nil {
+			mb.chosen = mb.child.chosen // bubble up
+			mb.child = nil
+			return
+		}
+		if mb.child.cancelled {
+			mb.child = nil
+			ev.Handled = true
+			return
+		}
+		if ev.Handled {
+			return
+		}
+	}
+
 	switch ev.Type {
 	case core.EvKeyboard:
 		switch ev.Key {
 		case core.KbUp:
 			mb.moveSel(-1)
+			mb.child = nil
 			ev.Handled = true
 		case core.KbDown:
 			mb.moveSel(1)
+			mb.child = nil
 			ev.Handled = true
-		case core.KbEnter:
+		case core.KbRight, core.KbEnter:
 			mb.activate()
 			ev.Handled = true
+		case core.KbLeft:
+			if mb.child != nil {
+				mb.child = nil
+			} else {
+				mb.cancelled = true
+			}
+			ev.Handled = true
 		case core.KbEsc:
+			mb.child = nil
 			mb.cancelled = true
 			ev.Handled = true
 		}
@@ -307,6 +345,8 @@ func (mb *MenuBox) HandleEvent(ev *core.Event) {
 				mb.activate()
 			}
 			ev.Handled = true
+		} else if mb.child != nil && mb.child.bounds.Contains(p) {
+			// click inside child — already routed above
 		} else {
 			mb.cancelled = true
 			ev.Handled = true
@@ -318,7 +358,8 @@ func (mb *MenuBox) moveSel(delta int) {
 	n := len(mb.items)
 	for i := 1; i <= n; i++ {
 		next := (mb.selected + delta*i + n*i) % n
-		if mb.items[next].Cmd != 0 {
+		item := mb.items[next]
+		if item.Cmd != 0 || item.SubMenu != nil {
 			mb.selected = next
 			return
 		}
@@ -326,17 +367,43 @@ func (mb *MenuBox) moveSel(delta int) {
 }
 
 func (mb *MenuBox) activate() {
-	if mb.selected >= 0 && mb.selected < len(mb.items) {
-		item := mb.items[mb.selected]
-		if item.Cmd != 0 {
-			mb.chosen = item
-		}
+	if mb.selected < 0 || mb.selected >= len(mb.items) {
+		return
 	}
+	item := mb.items[mb.selected]
+	if item.SubMenu != nil {
+		mb.openChild(item)
+	} else if item.Cmd != 0 {
+		mb.chosen = item
+	}
+}
+
+// openChild opens a nested MenuBox for item to the right of this box.
+func (mb *MenuBox) openChild(item *MenuItem) {
+	childW := menuBoxWidth(item.SubMenu)
+	childH := len(item.SubMenu) + 2
+	// Position: right edge of parent, aligned to the selected row.
+	x := mb.bounds.X + mb.bounds.W
+	y := mb.bounds.Y + mb.selected + 1 // +1 for border row
+	mb.child = NewMenuBox(core.Rect{X: x, Y: y, W: childW, H: childH}, item.SubMenu)
+}
+
+// DrawChildPopup draws any open child (and grandchildren) into the full
+// application buffer. Called by MenuBar.DrawPopup after drawing the root popup.
+func (mb *MenuBox) DrawChildPopup(buf *core.DrawBuffer) {
+	if mb.child == nil {
+		return
+	}
+	b := mb.child.bounds
+	sub := core.NewDrawBuffer(b.W, b.H, core.AttrMenuBox)
+	mb.child.Draw(sub)
+	buf.CopyFrom(sub, b.X, b.Y)
+	mb.child.DrawChildPopup(buf) // recurse for deeper nesting
 }
 
 func firstSelectable(items []*MenuItem) int {
 	for i, item := range items {
-		if item.Cmd != 0 {
+		if item.Cmd != 0 || item.SubMenu != nil {
 			return i
 		}
 	}
