@@ -10,8 +10,8 @@ const (
 	CmDebugRun   core.CommandId = 1003 // F5: start/continue debug
 	CmStepOver   core.CommandId = 1004 // F8: step over
 	CmStepInto   core.CommandId = 1005 // F7: step into
-	CmStopDebug  core.CommandId = 1006 // Ctrl+F2: stop debugger
-	CmToggleBP      core.CommandId = 1007 // Ctrl+F5: toggle breakpoint at cursor line
-	CmSetFormatELF  core.CommandId = 1008 // set output format to Linux ELF64
+	CmStopDebug      core.CommandId = 1006 // Ctrl+F2: stop debugger
+	CmToggleBP       core.CommandId = 1007 // Ctrl+F5: toggle breakpoint at cursor line
+	CmSetFormatELF   core.CommandId = 1008 // set output format to Linux ELF64
 	CmSetFormatMachO core.CommandId = 1009 // set output format to macOS Mach-O
 )
