@@ -7,7 +7,7 @@ on:
 jobs:
   macos-macho:
     name: Compile and run arrec.pas (Mach-O x86-64)
-    runs-on: macos-13   # Intel x86-64 runner; our generated binary is x86-64 Mach-O
+    runs-on: macos-14   # Apple Silicon runner (ARM64); Rosetta 2 will run our x86-64 binary.
 
     steps:
       - uses: actions/checkout@v4
