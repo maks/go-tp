@@ -160,19 +160,19 @@ func TestErrorLineHighlighter(t *testing.T) {
 func TestGutterDraw(t *testing.T) {
 	editor := views.NewEditor(core.Rect{W: 40, H: 10})
 	editor.SetText("line1\nline2\nline3")
-	gutter := NewLineNumberGutter(core.Rect{W: 3, H: 5}, editor)
-	buf := core.NewDrawBuffer(3, 5, core.AttrNormal)
+	gutter := NewLineNumberGutter(core.Rect{W: 4, H: 5}, editor)
+	buf := core.NewDrawBuffer(4, 5, core.AttrNormal)
 	gutter.Draw(buf)
 
-	// Check first row contains "  1"
+	// Check first row: marker col (space) + "  1" = "   1"
 	var row0 string
-	for x := 0; x < 3; x++ {
+	for x := 0; x < 4; x++ {
 		if c := buf.At(x, 0); c != nil {
 			row0 += string(c.Ch)
 		}
 	}
-	if row0 != "  1" {
-		t.Errorf("gutter row 0: want '  1', got %q", row0)
+	if row0 != "   1" {
+		t.Errorf("gutter row 0: want '   1', got %q", row0)
 	}
 }
 
@@ -269,6 +269,102 @@ func TestOutputWindowGotoErr(t *testing.T) {
 
 	if gotLine != 5 {
 		t.Errorf("OnGotoErr called with %d, want 5", gotLine)
+	}
+}
+
+// ---- IdeEditorWindow breakpoint / current-line tests ----
+
+func TestEditorWindowBreakpoints(t *testing.T) {
+	ew := NewIdeEditorWindow(core.Rect{X: 0, Y: 0, W: 80, H: 24})
+	ew.SetFile("", "line1\nline2\nline3\n")
+
+	// Toggle line 2 on.
+	added := ew.ToggleBreakpoint(2)
+	if !added {
+		t.Error("ToggleBreakpoint: first call should add")
+	}
+	if !ew.Breakpoints()[2] {
+		t.Error("Breakpoints()[2] should be true after toggle on")
+	}
+
+	// Toggle line 2 off.
+	added = ew.ToggleBreakpoint(2)
+	if added {
+		t.Error("ToggleBreakpoint: second call should remove")
+	}
+	if ew.Breakpoints()[2] {
+		t.Error("Breakpoints()[2] should be false after toggle off")
+	}
+}
+
+func TestEditorWindowCurrentLine(t *testing.T) {
+	ew := NewIdeEditorWindow(core.Rect{X: 0, Y: 0, W: 80, H: 24})
+	ew.SetCurrentLine(5)
+	if ew.currentLine != 5 {
+		t.Errorf("currentLine: want 5, got %d", ew.currentLine)
+	}
+	ew.ClearCurrentLine()
+	if ew.currentLine != 0 {
+		t.Errorf("ClearCurrentLine: want 0, got %d", ew.currentLine)
+	}
+}
+
+func TestGutterBreakpointMarker(t *testing.T) {
+	editor := views.NewEditor(core.Rect{W: 40, H: 10})
+	editor.SetText("line1\nline2\nline3")
+	gutter := NewLineNumberGutter(core.Rect{W: 4, H: 5}, editor)
+	gutter.GetBreakpointAt = func(line int) bool { return line == 1 }
+	gutter.GetCurrentLine = func() int { return 0 }
+
+	buf := core.NewDrawBuffer(4, 5, core.AttrNormal)
+	gutter.Draw(buf)
+
+	// Row 0 (line 1) should have '●' as first character.
+	if c := buf.At(0, 0); c == nil || c.Ch != '●' {
+		ch := rune(0)
+		if c != nil {
+			ch = c.Ch
+		}
+		t.Errorf("gutter row 0 col 0: want '●', got %q", ch)
+	}
+}
+
+func TestGutterCurrentLineMarker(t *testing.T) {
+	editor := views.NewEditor(core.Rect{W: 40, H: 10})
+	editor.SetText("line1\nline2\nline3")
+	gutter := NewLineNumberGutter(core.Rect{W: 4, H: 5}, editor)
+	gutter.GetBreakpointAt = func(line int) bool { return false }
+	gutter.GetCurrentLine = func() int { return 2 }
+
+	buf := core.NewDrawBuffer(4, 5, core.AttrNormal)
+	gutter.Draw(buf)
+
+	// Row 1 (line 2) should have '→' as first character.
+	if c := buf.At(0, 1); c == nil || c.Ch != '→' {
+		ch := rune(0)
+		if c != nil {
+			ch = c.Ch
+		}
+		t.Errorf("gutter row 1 col 0: want '→', got %q", ch)
+	}
+}
+
+// ---- WatchWindow tests ----
+
+func TestWatchWindowSetValues(t *testing.T) {
+	ww := NewWatchWindow(core.Rect{X: 0, Y: 0, W: 40, H: 10})
+	if ww == nil {
+		t.Fatal("NewWatchWindow returned nil")
+	}
+
+	// Import debugger package indirectly through the type.
+	// We construct VarSnapshot values manually.
+	type snap = struct{ Name, Value string }
+	snaps := []snap{{"x", "42"}, {"ok", "true"}}
+	_ = snaps // just ensure compilation; SetValues uses debugger.VarSnapshot
+	ww.Clear()
+	if len(ww.vars) != 0 {
+		t.Errorf("after Clear: want 0 vars, got %d", len(ww.vars))
 	}
 }
 

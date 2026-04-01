@@ -29,6 +29,9 @@ func (m *mockGen) EmitCallProc(addr int)       { m.ops = append(m.ops, "call") }
 func (m *mockGen) EmitCallBuiltin(idx int)     { m.ops = append(m.ops, "builtin") }
 func (m *mockGen) SetMainEntry(addr int)        {}
 func (m *mockGen) Finalize() error             { return nil }
+func (m *mockGen) EmitDebugLine(line int)      {}
+func (m *mockGen) AddDebugVar(v DebugVar)      {}
+func (m *mockGen) DebugInfo() *DebugInfo       { return nil }
 
 func TestCompilerHello(t *testing.T) {
 	src := `program hello;

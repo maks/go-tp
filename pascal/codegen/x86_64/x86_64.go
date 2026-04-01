@@ -31,6 +31,10 @@ type CodeGen struct {
 	outputPath string
 	// mainEntry is the code offset of the program's main body.
 	mainEntry int
+	// debugLines accumulates source-line to code-address mappings.
+	debugLines []pascal.DebugLine
+	// debugVars accumulates variable declarations for the watch window.
+	debugVars []pascal.DebugVar
 }
 
 type strReloc struct {
@@ -753,6 +757,44 @@ func appendPHDR(buf []byte, ptype uint32, offset, vaddr, filesz, memsz uint64, f
 }
 
 func align16(n int) int { return (n + 15) &^ 15 }
+
+// ---- debug info ----
+
+// EmitDebugLine records that the next emitted instruction corresponds to the
+// given 1-based source line. Duplicate consecutive line entries are dropped.
+func (g *CodeGen) EmitDebugLine(line int) {
+	if len(g.debugLines) == 0 || g.debugLines[len(g.debugLines)-1].Line != line {
+		g.debugLines = append(g.debugLines, pascal.DebugLine{
+			Line:     line,
+			CodeAddr: len(g.code),
+		})
+	}
+}
+
+// AddDebugVar registers a variable declaration for the watch window.
+func (g *CodeGen) AddDebugVar(v pascal.DebugVar) {
+	g.debugVars = append(g.debugVars, v)
+}
+
+// DebugInfo returns the accumulated debug information after Finalize().
+func (g *CodeGen) DebugInfo() *pascal.DebugInfo {
+	return &pascal.DebugInfo{
+		Lines: g.debugLines,
+		Vars:  g.debugVars,
+	}
+}
+
+// TextVMA returns the virtual memory address of the first user code instruction.
+// Layout: ELF-header(64) + 2×program-header(56) + _start-stub(17) + user-code.
+// This is a fixed constant for our static ELF64 layout with base VA 0x400000.
+func (g *CodeGen) TextVMA() uintptr {
+	const baseVA = 0x400000
+	const elfHeaderSize = 64
+	const phdrSize = 56
+	const numPhdrs = 2
+	const startStubSize = 17 // buildStart() returns 17 bytes
+	return uintptr(baseVA + elfHeaderSize + numPhdrs*phdrSize + startStubSize)
+}
 
 // EmitLoadVarAddr emits: lea rax, [rbp + offset]
 func (g *CodeGen) EmitLoadVarAddr(offset int) {

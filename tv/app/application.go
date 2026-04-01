@@ -20,6 +20,9 @@ type Application struct {
 	running bool
 	// CommandHandler is called for application-level commands.
 	CommandHandler func(core.CommandId)
+	// TickHandler, if set, is called once per event-loop iteration before
+	// polling for input. Use it to inject background events (e.g. debugger).
+	TickHandler func()
 }
 
 // New creates an Application with the given backend.
@@ -76,6 +79,9 @@ func (a *Application) Desktop() *views.Desktop { return a.desktop }
 // Run enters the main event loop. It blocks until Stop is called.
 func (a *Application) Run() {
 	for a.running {
+		if a.TickHandler != nil {
+			a.TickHandler()
+		}
 		a.render()
 		ev := a.backend.PollEvent()
 		if ev != nil {

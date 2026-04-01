@@ -42,20 +42,35 @@ func Run() {
 	if edH < 5 {
 		edH = 5
 	}
-	outH := desktopH - edH
-	if outH < 3 {
-		outH = 3
+	bottomH := desktopH - edH
+	if bottomH < 3 {
+		bottomH = 3
+	}
+	// Split bottom pane: output(60%) | watches(40%).
+	outW := cols * 6 / 10
+	if outW < 20 {
+		outW = 20
+	}
+	watchW := cols - outW
+	if watchW < 10 {
+		watchW = 10
 	}
 
 	editorWin := NewIdeEditorWindow(core.Rect{X: 0, Y: desktopTop, W: cols, H: edH})
-	outputWin := NewOutputWindow(core.Rect{X: 0, Y: desktopTop + edH, W: cols, H: outH})
+	outputWin := NewOutputWindow(core.Rect{X: 0, Y: desktopTop + edH, W: outW, H: bottomH})
+	watchWin := NewWatchWindow(core.Rect{X: outW, Y: desktopTop + edH, W: watchW, H: bottomH})
 
 	// Wire goto-error callback.
 	outputWin.OnGotoErr = func(srcLine int) {
-		// GotoLine is 0-based; diagnostics are 1-based.
 		editorWin.Editor().GotoLine(srcLine-1, 0)
 		desktop.BringToFront(editorWin.Win())
 	}
+
+	// Create debugger bridge.
+	ideDbg := NewIdeDebugger(editorWin, watchWin)
+
+	// Wire tick handler for non-blocking debug event polling.
+	application.TickHandler = func() { ideDbg.Poll() }
 
 	// Load initial file from command line.
 	if len(os.Args) > 1 {
@@ -66,7 +81,8 @@ func Run() {
 		editorWin.setNewFile()
 	}
 
-	// Output window added first (lower z-order); editor on top receives keyboard focus.
+	// Output window and watch window added first (lower z-order); editor on top.
+	desktop.AddWindow(watchWin.Win())
 	desktop.AddWindow(outputWin.Win())
 	desktop.AddWindow(editorWin.Win())
 
@@ -74,7 +90,7 @@ func Run() {
 	application.SetStatusLine(buildStatusLine())
 
 	application.CommandHandler = func(cmd core.CommandId) {
-		handleCommand(cmd, application, editorWin, outputWin)
+		handleCommand(cmd, application, editorWin, outputWin, ideDbg)
 	}
 
 	editorWin.Win().SetInitialFocus()
@@ -103,6 +119,14 @@ func buildMenuBar() []*views.MenuItem {
 			{Label: "Build", Cmd: CmBuild, HotKey: core.KbF9, HotText: "F9"},
 			{Label: "Run", Cmd: CmRun, HotKey: core.KbCtrlF9, HotText: "^F9"},
 		}},
+		{Label: "Debug", SubMenu: []*views.MenuItem{
+			{Label: "Debug Run", Cmd: CmDebugRun, HotKey: core.KbF5, HotText: "F5"},
+			{Label: "Step Over", Cmd: CmStepOver, HotKey: core.KbF8, HotText: "F8"},
+			{Label: "Step Into", Cmd: CmStepInto, HotKey: core.KbF7, HotText: "F7"},
+			views.Sep(),
+			{Label: "Toggle Breakpoint", Cmd: CmToggleBP, HotKey: core.KbCtrlF5, HotText: "^F5"},
+			{Label: "Stop Debugger", Cmd: CmStopDebug, HotKey: core.KbCtrlF2, HotText: "^F2"},
+		}},
 	}
 }
 
@@ -110,12 +134,17 @@ func buildStatusLine() []views.StatusItem {
 	return []views.StatusItem{
 		{Label: "F2 Save", Key: core.KbF2, Cmd: core.CmSave},
 		{Label: "F3 Open", Key: core.KbF3, Cmd: core.CmOpen},
+		{Label: "F5 Debug", Key: core.KbF5, Cmd: CmDebugRun},
+		{Label: "F7 Into", Key: core.KbF7, Cmd: CmStepInto},
+		{Label: "F8 Over", Key: core.KbF8, Cmd: CmStepOver},
 		{Label: "F9 Build", Key: core.KbF9, Cmd: CmBuild},
+		{Label: "^F2 Stop", Key: core.KbCtrlF2, Cmd: CmStopDebug},
+		{Label: "^F5 BP", Key: core.KbCtrlF5, Cmd: CmToggleBP},
 		{Label: "^F9 Run", Key: core.KbCtrlF9, Cmd: CmRun},
 	}
 }
 
-func handleCommand(cmd core.CommandId, a *app.Application, ew *IdeEditorWindow, ow *OutputWindow) {
+func handleCommand(cmd core.CommandId, a *app.Application, ew *IdeEditorWindow, ow *OutputWindow, ideDbg *IdeDebugger) {
 	switch cmd {
 	case core.CmNew:
 		ew.setNewFile()
@@ -131,10 +160,22 @@ func handleCommand(cmd core.CommandId, a *app.Application, ew *IdeEditorWindow, 
 		doBuild(ew, ow)
 	case CmRun:
 		doRun(ew, ow)
+	case CmDebugRun:
+		doDebugRun(ew, ow, ideDbg)
+	case CmStepOver:
+		ideDbg.StepOver()
+	case CmStepInto:
+		ideDbg.StepInto()
+	case CmStopDebug:
+		ideDbg.Stop()
+		ow.AppendLine("Debugger stopped.", attrOutputNormal)
+	case CmToggleBP:
+		ideDbg.ToggleBreakpoint()
 	}
 }
 
-func doBuild(ew *IdeEditorWindow, ow *OutputWindow) (string, bool) {
+// doBuild compiles the current file. Returns (outputPath, debugInfo, ok).
+func doBuild(ew *IdeEditorWindow, ow *OutputWindow) (string, *pascal.DebugInfo, bool) {
 	ow.Clear()
 	ow.AppendLine("Building...", attrOutputNormal)
 
@@ -155,16 +196,16 @@ func doBuild(ew *IdeEditorWindow, ow *OutputWindow) (string, bool) {
 		}
 		ew.SetErrorLines(errorLines)
 		ow.AppendLine(fmt.Sprintf("Build failed (%d error(s))", len(diags)), attrOutputError)
-		return "", false
+		return "", nil, false
 	}
 
 	ew.SetErrorLines(nil)
 	ow.AppendLine("Build OK — "+outPath, attrOutputOK)
-	return outPath, true
+	return outPath, gen.DebugInfo(), true
 }
 
 func doRun(ew *IdeEditorWindow, ow *OutputWindow) {
-	outPath, ok := doBuild(ew, ow)
+	outPath, _, ok := doBuild(ew, ow)
 	if !ok {
 		return
 	}
@@ -188,8 +229,6 @@ func doRun(ew *IdeEditorWindow, ow *OutputWindow) {
 		return
 	}
 
-	// Stream stdout (blocking — acceptable since the event loop is single-threaded).
-	// Use a goroutine + channel so the IDE remains responsive during long programs.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -205,6 +244,32 @@ func doRun(ew *IdeEditorWindow, ow *OutputWindow) {
 	}()
 	<-done
 	ow.AppendLine("Program exited.", attrOutputNormal)
+}
+
+func doDebugRun(ew *IdeEditorWindow, ow *OutputWindow, ideDbg *IdeDebugger) {
+	// If a session is already running, continue execution.
+	if ideDbg.HasSession() {
+		ideDbg.Run()
+		return
+	}
+
+	// Build first.
+	outPath, info, ok := doBuild(ew, ow)
+	if !ok {
+		return
+	}
+	if info == nil {
+		ow.AppendLine("No debug info from build.", attrOutputError)
+		return
+	}
+
+	ow.AppendLine("Starting debugger: "+outPath, attrOutputNormal)
+	if err := ideDbg.Start(outPath, info); err != nil {
+		ow.AppendLine("Debugger start failed: "+err.Error(), attrOutputError)
+		return
+	}
+	ow.AppendLine("Debugger ready. Press F5 to run, F8 step over, F7 step into.", attrOutputNormal)
+	// The process is paused at the initial stop; user presses F5 again to run.
 }
 
 func doOpenDialog(a *app.Application, ew *IdeEditorWindow, ow *OutputWindow) {
