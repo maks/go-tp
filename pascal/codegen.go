@@ -41,6 +41,17 @@ type CodeGen interface {
 
 	// Finalize produces the final binary / code buffer.
 	Finalize() error
+
+	// EmitDebugLine records that the next emitted instruction corresponds to
+	// the given 1-based source line. No-op on backends that do not support debug.
+	EmitDebugLine(line int)
+
+	// AddDebugVar registers a variable declaration for the watch window.
+	AddDebugVar(v DebugVar)
+
+	// DebugInfo returns the accumulated debug information after Finalize().
+	// Returns nil on backends that do not support debug.
+	DebugInfo() *DebugInfo
 }
 
 // Builtin indices shared between all backends and the compiler.

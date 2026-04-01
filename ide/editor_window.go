@@ -10,13 +10,15 @@ import (
 
 // IdeEditorWindow wraps a views.Window with a line number gutter, editor, and scrollbars.
 type IdeEditorWindow struct {
-	win      *views.Window
-	editor   *views.Editor
-	gutter   *LineNumberGutter
-	vScroll  *views.ScrollBar
-	hl       *PascalHighlighter
-	filePath string
-	modified bool
+	win             *views.Window
+	editor          *views.Editor
+	gutter          *LineNumberGutter
+	vScroll         *views.ScrollBar
+	hl              *PascalHighlighter
+	filePath        string
+	modified        bool
+	breakpointLines map[int]bool
+	currentLine     int // 1-based; 0 = none
 }
 
 // NewIdeEditorWindow creates an editor window filling the given bounds.
@@ -25,8 +27,8 @@ func NewIdeEditorWindow(bounds core.Rect) *IdeEditorWindow {
 	iW := bounds.W - 2 // interior width (inside 1-cell frame border)
 	iH := bounds.H - 2 // interior height
 
-	// Layout: gutter(3) | editor(iW-4) | vscroll(1)
-	gutterW := 3
+	// Layout: gutter(4) | editor(iW-5) | vscroll(1)
+	gutterW := 4
 	scrollW := 1
 	edW := iW - gutterW - scrollW
 	if edW < 1 {
@@ -50,12 +52,17 @@ func NewIdeEditorWindow(bounds core.Rect) *IdeEditorWindow {
 	win.Add(vScroll, vScrollRel)
 
 	ew := &IdeEditorWindow{
-		win:     win,
-		editor:  editor,
-		gutter:  gutter,
-		vScroll: vScroll,
-		hl:      hl,
+		win:             win,
+		editor:          editor,
+		gutter:          gutter,
+		vScroll:         vScroll,
+		hl:              hl,
+		breakpointLines: make(map[int]bool),
 	}
+
+	// Wire gutter callbacks.
+	gutter.GetBreakpointAt = func(line int) bool { return ew.breakpointLines[line] }
+	gutter.GetCurrentLine = func() int { return ew.currentLine }
 
 	// Wire scrollbar to editor.
 	vScroll.OnChange = func(v int) {
@@ -142,6 +149,29 @@ func (ew *IdeEditorWindow) saveFile() error {
 	ew.updateTitle()
 	return nil
 }
+
+// ToggleBreakpoint toggles a breakpoint on the given 1-based line.
+// Returns true if a breakpoint was added, false if it was removed.
+func (ew *IdeEditorWindow) ToggleBreakpoint(line int) bool {
+	if ew.breakpointLines[line] {
+		delete(ew.breakpointLines, line)
+		return false
+	}
+	ew.breakpointLines[line] = true
+	return true
+}
+
+// Breakpoints returns the set of lines that have breakpoints (1-based).
+func (ew *IdeEditorWindow) Breakpoints() map[int]bool { return ew.breakpointLines }
+
+// SetCurrentLine sets the current execution line (1-based; 0 = clear).
+func (ew *IdeEditorWindow) SetCurrentLine(line int) { ew.currentLine = line }
+
+// ClearCurrentLine removes the current execution indicator.
+func (ew *IdeEditorWindow) ClearCurrentLine() { ew.currentLine = 0 }
+
+// CursorLine returns the 1-based line the editor cursor is on.
+func (ew *IdeEditorWindow) CursorLine() int { return ew.editor.CursorRow() + 1 }
 
 // setNewFile clears the editor and resets to an untitled file.
 func (ew *IdeEditorWindow) setNewFile() {

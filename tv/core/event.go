@@ -45,6 +45,10 @@ const (
 	KbF10      KeyCode = 0x4400
 	KbF11      KeyCode = 0x5700 // non-Borland extension
 	KbF12      KeyCode = 0x5800
+	// Ctrl+F2
+	KbCtrlF2 KeyCode = 0x5F00
+	// Ctrl+F5
+	KbCtrlF5 KeyCode = 0x6200
 	// Ctrl+F9
 	KbCtrlF9 KeyCode = 0x2300
 	// Shift+Tab

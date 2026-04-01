@@ -153,6 +153,22 @@ func (b *Backend) PollEvent() *core.Event {
 			return &ev
 		}
 
+		// Intercept Ctrl+F2: ESC [ 1 2 ; 5 ~ (7 bytes).
+		if raw == 0x1B && i+6 < len(buf) &&
+			buf[i+1] == '[' && buf[i+2] == '1' && buf[i+3] == '2' &&
+			buf[i+4] == ';' && buf[i+5] == '5' && buf[i+6] == '~' {
+			ev := core.KeyEvent(core.KbCtrlF2, 0)
+			i += 6
+			return &ev
+		}
+		// Intercept Ctrl+F5: ESC [ 1 5 ; 5 ~ (7 bytes).
+		if raw == 0x1B && i+6 < len(buf) &&
+			buf[i+1] == '[' && buf[i+2] == '1' && buf[i+3] == '5' &&
+			buf[i+4] == ';' && buf[i+5] == '5' && buf[i+6] == '~' {
+			ev := core.KeyEvent(core.KbCtrlF5, 0)
+			i += 6
+			return &ev
+		}
 		// Intercept Ctrl+F9: ESC [ 2 0 ; 5 ~ (7 bytes).
 		if raw == 0x1B && i+6 < len(buf) &&
 			buf[i+1] == '[' && buf[i+2] == '2' && buf[i+3] == '0' &&

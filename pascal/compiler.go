@@ -169,6 +169,13 @@ func (c *Compiler) parseVarSection() {
 			sym := c.scope.DeclareVarSized(name, td.Kind, td.Size)
 			sym.ArrInfo = td.ArrInfo
 			sym.RecInfo = td.RecInfo
+			c.gen.AddDebugVar(DebugVar{
+				Name:      sym.Name,
+				Type:      sym.Type,
+				RbpOffset: sym.Offset,
+				ArrInfo:   sym.ArrInfo,
+				RecInfo:   sym.RecInfo,
+			})
 		}
 	}
 }
@@ -356,7 +363,12 @@ func (c *Compiler) parseProcOrFunc() {
 	// last declared param gets rbp+16 (immediately above saved-rbp+ret-addr).
 	for i, p := range allParams {
 		offset := 16 + (len(allParams)-1-i)*8
-		c.scope.DeclareParam(p.name, p.typ, offset)
+		sym := c.scope.DeclareParam(p.name, p.typ, offset)
+		c.gen.AddDebugVar(DebugVar{
+			Name:      sym.Name,
+			Type:      sym.Type,
+			RbpOffset: sym.Offset,
+		})
 	}
 
 	// Return type for functions (result stored as first local var at [rbp-8]).
@@ -367,6 +379,11 @@ func (c *Compiler) parseProcOrFunc() {
 		retType = c.parseType()
 		resSym := c.scope.DeclareVar(name, retType)
 		resultVarOffset = resSym.Offset
+		c.gen.AddDebugVar(DebugVar{
+			Name:      name + "_result",
+			Type:      retType,
+			RbpOffset: resSym.Offset,
+		})
 	}
 	c.expect(TkSemi)
 
@@ -416,6 +433,7 @@ func (c *Compiler) parseBlock() {
 }
 
 func (c *Compiler) parseStatement() {
+	c.gen.EmitDebugLine(c.tok.Line)
 	switch c.tok.Kind {
 	case TkIdent:
 		c.parseIdentStatement()
