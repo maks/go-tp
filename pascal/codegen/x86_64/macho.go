@@ -36,12 +36,13 @@ func (g *CodeGen) finalizeMachO(fullCode []byte, startSize int) error {
 	}
 
 	codeSize := rodataFileOff - textFileOff
-	fileSize := rodataFileOff + uint64(len(g.rodata))
+	fileSizeRaw := rodataFileOff + uint64(len(g.rodata))
+	fileSizeAligned := alignUp(fileSizeRaw, machoPageSize)
+	
+	textVmsize := fileSizeAligned
 
-	textVmsize := alignUp(fileSize, machoPageSize)
-
-	buf := make([]byte, 0, int(fileSize))
-	buf = appendMachOHeaders(buf, textVA /* entryVA */, codeSize, fileSize, textVmsize)
+	buf := make([]byte, 0, int(fileSizeAligned))
+	buf = appendMachOHeaders(buf, textVA /* entryVA */, codeSize, fileSizeAligned, textVmsize)
 
 	// Pad header to machoHeaderSize
 	pad := machoHeaderSize - len(buf)
@@ -54,6 +55,9 @@ func (g *CodeGen) finalizeMachO(fullCode []byte, startSize int) error {
 	buf = append(buf, fullCode...)
 	buf = append(buf, make([]byte, rodataFileOff - textFileOff - uint64(len(fullCode)))...)
 	buf = append(buf, g.rodata...)
+	
+	// Pad to page alignment
+	buf = append(buf, make([]byte, fileSizeAligned - fileSizeRaw)...)
 
 	if err := os.WriteFile(g.outputPath, buf, 0755); err != nil {
 		return fmt.Errorf("write Mach-O binary: %w", err)
@@ -108,7 +112,7 @@ func appendMachOHeaders(buf []byte, entryVA, codeSize, fileSize, textVmsize uint
 	binary.LittleEndian.PutUint64(seg[32:], textVmsize)        // vmsize
 	binary.LittleEndian.PutUint64(seg[40:], 0)                 // fileoff (segment starts at 0)
 	binary.LittleEndian.PutUint64(seg[48:], fileSize)          // filesize
-	binary.LittleEndian.PutUint32(seg[56:], 7)                 // maxprot  = rwx
+	binary.LittleEndian.PutUint32(seg[56:], 5)                 // maxprot  = r-x
 	binary.LittleEndian.PutUint32(seg[60:], 5)                 // initprot = r-x
 	binary.LittleEndian.PutUint32(seg[64:], 1)                 // nsects
 	
@@ -130,7 +134,7 @@ func appendMachOHeaders(buf []byte, entryVA, codeSize, fileSize, textVmsize uint
 	binary.LittleEndian.PutUint64(le[32:], machoPageSize)      // vmsize
 	binary.LittleEndian.PutUint64(le[40:], fileSize)           // fileoff
 	binary.LittleEndian.PutUint64(le[48:], 0)                  // filesize
-	binary.LittleEndian.PutUint32(le[56:], 7)                  // maxprot
+	binary.LittleEndian.PutUint32(le[56:], 3)                  // maxprot = rw-
 	binary.LittleEndian.PutUint32(le[60:], 1)                  // initprot = r--
 	binary.LittleEndian.PutUint32(le[64:], 0)                  // nsects
 	buf = append(buf, le...)
