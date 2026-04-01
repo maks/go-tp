@@ -1,0 +1,42 @@
+name: macOS Mach-O integration test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos-macho:
+    name: Compile and run arrec.pas (Mach-O x86-64)
+    runs-on: macos-13   # Intel x86-64 runner; our generated binary is x86-64 Mach-O
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build pascc compiler
+        run: go build -o pascc ./cmd/pascc
+
+      - name: Compile arrec.pas to Mach-O
+        run: ./pascc -format macho -o arrec sample/arrec.pas
+
+      - name: Ad-hoc sign binary
+        # Required on modern macOS: unsigned binaries are refused by the kernel.
+        # --sign - performs an ad-hoc signature (no certificate needed).
+        run: codesign --sign - arrec
+
+      - name: Run arrec and verify output
+        run: |
+          actual=$(./arrec)
+          expected=$'60\n10'
+          if [ "$actual" = "$expected" ]; then
+            echo "Output matches expected:"
+            echo "$actual"
+          else
+            echo "Output mismatch!"
+            echo "Expected: $(echo "$expected" | cat -A)"
+            echo "Actual:   $(echo "$actual" | cat -A)"
+            exit 1
+          fi
