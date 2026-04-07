@@ -18,6 +18,10 @@ import (
 	"go-tp/tv/views"
 )
 
+// currentOutputFormat is the user-selected binary output format.
+// Defaults to ELF (Linux). Toggled via the Compile > Output Format menu.
+var currentOutputFormat = x86codegen.FormatELF
+
 func execCommand(path string) *exec.Cmd {
 	return exec.Command(path)
 }
@@ -118,6 +122,11 @@ func buildMenuBar() []*views.MenuItem {
 		{Label: "Compile", SubMenu: []*views.MenuItem{
 			{Label: "Build", Cmd: CmBuild, HotKey: core.KbF9, HotText: "F9"},
 			{Label: "Run", Cmd: CmRun, HotKey: core.KbCtrlF9, HotText: "^F9"},
+			views.Sep(),
+			{Label: "Output Format", SubMenu: []*views.MenuItem{
+				{Label: "Linux (ELF64)", Cmd: CmSetFormatELF},
+				{Label: "macOS (Mach-O)", Cmd: CmSetFormatMachO},
+			}},
 		}},
 		{Label: "Debug", SubMenu: []*views.MenuItem{
 			{Label: "Debug Run", Cmd: CmDebugRun, HotKey: core.KbF5, HotText: "F5"},
@@ -171,6 +180,12 @@ func handleCommand(cmd core.CommandId, a *app.Application, ew *IdeEditorWindow, 
 		ow.AppendLine("Debugger stopped.", attrOutputNormal)
 	case CmToggleBP:
 		ideDbg.ToggleBreakpoint()
+	case CmSetFormatELF:
+		currentOutputFormat = x86codegen.FormatELF
+		ow.AppendLine("Output format: Linux (ELF64)", attrOutputNormal)
+	case CmSetFormatMachO:
+		currentOutputFormat = x86codegen.FormatMachO
+		ow.AppendLine("Output format: macOS (Mach-O)", attrOutputNormal)
 	}
 }
 
@@ -183,6 +198,7 @@ func doBuild(ew *IdeEditorWindow, ow *OutputWindow) (string, *pascal.DebugInfo, 
 	outPath := buildOutputPath(ew.filePath)
 
 	gen := x86codegen.New(outPath)
+	gen.Format = currentOutputFormat
 	compiler := pascal.NewCompiler(src, gen)
 	diags := compiler.Compile()
 

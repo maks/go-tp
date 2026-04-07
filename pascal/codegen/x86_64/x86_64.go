@@ -27,8 +27,10 @@ type CodeGen struct {
 	procCalls []procCall
 	// builtinCalls records call sites targeting builtin helpers.
 	builtinCalls []builtinCall
-	// outputPath is where the finished ELF64 binary is written.
+	// outputPath is where the finished binary is written.
 	outputPath string
+	// Format selects the output binary format (ELF or Mach-O).
+	Format OutputFormat
 	// mainEntry is the code offset of the program's main body.
 	mainEntry int
 	// debugLines accumulates source-line to code-address mappings.
@@ -243,53 +245,55 @@ func (g *CodeGen) EmitCallBuiltin(idx int) {
 	g.builtinCalls = append(g.builtinCalls, builtinCall{codeOff: site, idx: idx})
 }
 
-// ---- ELF64 output ----
+// ---- binary output ----
 
-// Finalize patches relocations, appends builtins and _start, then writes ELF64.
+// Finalize patches relocations, appends builtins and _start, then writes
+// either an ELF64 (Linux) or Mach-O (macOS) binary depending on g.Format.
 func (g *CodeGen) Finalize() error {
-	// Build builtin helpers.
-	builtins := buildBuiltins()
+	sc := g.Format.sc()
 
-	// Build _start stub (17 bytes: call + exit syscall).
-	// _start is prepended so it's the ELF entry point.
-	// It calls main (at startSize) then exits.
-	startStub := buildStart()
+	// Build _start stub and builtin helpers.
+	startStub := buildStart(sc)
 	startSize := len(startStub)
+	builtins := buildBuiltins(sc)
 
-	// Full code: _start | user code | builtins
+	// Full code block: _start | user code | builtins
 	fullCode := make([]byte, 0, startSize+len(g.code)+len(builtins))
 	fullCode = append(fullCode, startStub...)
 	fullCode = append(fullCode, g.code...)
 	fullCode = append(fullCode, builtins...)
 
-	// Patch _start's call to main.
-	// call at offset 0 (rel32 at offset 1): target = startSize + mainEntry.
+	// Patch _start's call to main (rel32 at byte 1).
 	mainOff := startSize
 	if g.mainEntry >= 0 {
 		mainOff = startSize + g.mainEntry
 	}
-	rel := mainOff - 5
-	binary.LittleEndian.PutUint32(fullCode[1:5], uint32(int32(rel)))
+	binary.LittleEndian.PutUint32(fullCode[1:5], uint32(int32(mainOff-5)))
 
-	// Patch user proc calls (offsets in g.code, now shifted by startSize).
+	// Patch user proc calls (offsets in g.code, shifted by startSize).
 	for _, pc := range g.procCalls {
-		abs := startSize + pc.codeOff          // position of rel32 in fullCode
-		target := startSize + pc.target        // target in fullCode
-		pcRel := target - (abs + 4)
-		binary.LittleEndian.PutUint32(fullCode[abs:], uint32(int32(pcRel)))
+		abs := startSize + pc.codeOff
+		target := startSize + pc.target
+		binary.LittleEndian.PutUint32(fullCode[abs:], uint32(int32(target-(abs+4))))
 	}
 
 	// Patch builtin calls.
 	builtinBase := startSize + len(g.code)
-	builtinOffsets := builtinCodeOffsets()
+	builtinOffsets := builtinCodeOffsets(sc)
 	for _, bc := range g.builtinCalls {
 		abs := startSize + bc.codeOff
 		target := builtinBase + builtinOffsets[bc.idx]
-		pcRel := target - (abs + 4)
-		binary.LittleEndian.PutUint32(fullCode[abs:], uint32(int32(pcRel)))
+		binary.LittleEndian.PutUint32(fullCode[abs:], uint32(int32(target-(abs+4))))
 	}
 
-	// ELF layout constants.
+	if g.Format == FormatMachO {
+		return g.finalizeMachO(fullCode, startSize)
+	}
+	return g.finalizeELF(fullCode, startSize)
+}
+
+// finalizeELF writes a static ELF64 binary.
+func (g *CodeGen) finalizeELF(fullCode []byte, startSize int) error {
 	const (
 		elfHeaderSize = 64
 		phdrSize      = 56
@@ -301,40 +305,29 @@ func (g *CodeGen) Finalize() error {
 	textFileOff := uint64(headersSize)
 	textVA := baseVA + textFileOff
 
-	// .rodata immediately after .text, aligned to 16.
 	rodataFileOff := textFileOff + uint64(len(fullCode))
 	rodataFileOff = (rodataFileOff + 15) &^ 15
 	rodataVA := baseVA + rodataFileOff
 
 	// Patch rip-relative string loads.
 	for _, sr := range g.strRelocs {
-		// The rel32 field is at fullCode[startSize + sr.codeOff].
 		shiftedOff := startSize + sr.codeOff
-		// Instruction end (next byte after rel32).
 		instrEndVA := textVA + uint64(shiftedOff+4)
 		targetVA := rodataVA + uint64(sr.rodataOff)
 		pcRel := int64(targetVA) - int64(instrEndVA)
 		binary.LittleEndian.PutUint32(fullCode[shiftedOff:], uint32(int32(pcRel)))
 	}
 
-	// File size.
 	textPadSize := rodataFileOff - textFileOff - uint64(len(fullCode))
 	fileSize := rodataFileOff + uint64(len(g.rodata))
-	segSize := fileSize
-
-	// ELF header entry point = _start = textVA.
-	entryVA := textVA
 
 	buf := make([]byte, 0, int(fileSize)+16)
-	buf = appendELFHeader(buf, entryVA, numPhdrs, elfHeaderSize)
-	// PHDR self-describing header.
+	buf = appendELFHeader(buf, textVA, numPhdrs, elfHeaderSize)
 	buf = appendPHDR(buf, 6 /*PT_PHDR*/, uint64(elfHeaderSize), baseVA+uint64(elfHeaderSize),
 		uint64(numPhdrs*phdrSize), uint64(numPhdrs*phdrSize), 4 /*R*/, 8)
-	// LOAD segment covering everything.
-	buf = appendPHDR(buf, 1 /*PT_LOAD*/, 0, baseVA, segSize, segSize, 5 /*R|X*/, 0x200000)
-
+	buf = appendPHDR(buf, 1 /*PT_LOAD*/, 0, baseVA, fileSize, fileSize, 5 /*R|X*/, 0x200000)
 	buf = append(buf, fullCode...)
-	buf = append(buf, make([]byte, textPadSize)...) // padding between text and rodata
+	buf = append(buf, make([]byte, textPadSize)...)
 	buf = append(buf, g.rodata...)
 
 	if err := os.WriteFile(g.outputPath, buf, 0755); err != nil {
@@ -346,9 +339,9 @@ func (g *CodeGen) Finalize() error {
 // ---- builtin helper byte arrays ----
 
 // buildBuiltins concatenates all builtin helpers in index order.
-func buildBuiltins() []byte {
+func buildBuiltins(sc sysCalls) []byte {
 	var buf []byte
-	for _, fn := range []func() []byte{
+	for _, fn := range []func(sysCalls) []byte{
 		buildWriteInt,
 		buildWriteStr,
 		buildWriteBool,
@@ -357,45 +350,46 @@ func buildBuiltins() []byte {
 		buildReadStr,
 		buildHalt,
 	} {
-		buf = append(buf, fn()...)
+		buf = append(buf, fn(sc)...)
 	}
 	return buf
 }
 
 // builtinCodeOffsets returns the starting byte offset of each builtin within
 // the concatenated builtin block returned by buildBuiltins.
-func builtinCodeOffsets() [numBuiltins]int {
+func builtinCodeOffsets(sc sysCalls) [numBuiltins]int {
 	var offsets [numBuiltins]int
-	fns := []func() []byte{
+	fns := []func(sysCalls) []byte{
 		buildWriteInt, buildWriteStr, buildWriteBool, buildWriteln,
 		buildReadInt, buildReadStr, buildHalt,
 	}
 	cur := 0
 	for i, fn := range fns {
 		offsets[i] = cur
-		cur += len(fn())
+		cur += len(fn(sc))
 	}
 	return offsets
 }
 
 var _ = pascal.BuiltinWriteInt // ensure pascal package is accessible
 
-// buildStart builds the _start stub (17 bytes).
-// call rel32 at byte 0 (rel32 placeholder at bytes 1-4), then exit(0).
-func buildStart() []byte {
-	return []byte{
-		0xE8, 0, 0, 0, 0,                // call main (rel32 patched later)
-		0x48, 0x31, 0xFF,                 // xor rdi, rdi
-		0x48, 0xC7, 0xC0, 60, 0, 0, 0,   // mov rax, 60 (SYS_exit)
-		0x0F, 0x05,                       // syscall
+// buildStart builds the _start stub.
+// Layout: call main (rel32 placeholder) → xor rdi,rdi → exit syscall.
+// Linux: 17 bytes (mov rax, imm32 sign-extended = 7 bytes).
+// macOS: 15 bytes (mov eax, imm32 = 5 bytes; zero-extends to rax).
+func buildStart(sc sysCalls) []byte {
+	b := []byte{
+		0xE8, 0, 0, 0, 0, // call main (rel32 patched by Finalize)
+		0x48, 0x31, 0xFF, // xor rdi, rdi  (exit code = 0)
 	}
+	b = append(b, 0xB8) // mov eax, exit_syscall
+	b = binary.LittleEndian.AppendUint32(b, sc.exit)
+	b = append(b, 0x0F, 0x05) // syscall
+	return b
 }
 
 // write_int: write rax as signed decimal to stdout.
-// Saved registers: rbx, rbp. Uses 24-byte stack buffer.
-func buildWriteInt() []byte { return buildWriteIntVerified() }
-
-// buildWriteIntVerified returns a verified x86-64 write_int helper.
+// Saved registers: rbx, rbp. Uses 32-byte stack buffer.
 // Encoded from the following assembly:
 //
 //	write_int:
@@ -443,8 +437,8 @@ func buildWriteInt() []byte { return buildWriteIntVerified() }
 //	  pop rbp
 //	  pop rbx
 //	  ret
-func buildWriteIntVerified() []byte {
-	return []byte{
+func buildWriteInt(sc sysCalls) []byte {
+	b := []byte{
 		// push rbx
 		0x53,
 		// push rbp
@@ -513,24 +507,22 @@ func buildWriteIntVerified() []byte {
 		0x48, 0x29, 0xF2,
 		// mov edi, 1  : BF 01 00 00 00
 		0xBF, 0x01, 0x00, 0x00, 0x00,
-		// mov eax, 1  : B8 01 00 00 00
-		0xB8, 0x01, 0x00, 0x00, 0x00,
-		// syscall  : 0F 05
-		0x0F, 0x05,
-		// add rsp, 32  : 48 83 C4 20
-		0x48, 0x83, 0xC4, 0x20,
-		// pop rbp  : 5D
-		0x5D,
-		// pop rbx  : 5B
-		0x5B,
-		// ret  : C3
-		0xC3,
 	}
+	// mov eax, sc.write  : B8 <4-byte LE>
+	b = append(b, 0xB8)
+	b = binary.LittleEndian.AppendUint32(b, sc.write)
+	return append(b,
+		0x0F, 0x05,                  // syscall
+		0x48, 0x83, 0xC4, 0x20,     // add rsp, 32
+		0x5D,                        // pop rbp
+		0x5B,                        // pop rbx
+		0xC3,                        // ret
+	)
 }
 
 // write_str: write null-terminated string in rax to stdout.
-func buildWriteStr() []byte {
-	return []byte{
+func buildWriteStr(sc sysCalls) []byte {
+	b := []byte{
 		// push rbx
 		0x53,
 		// mov rbx, rax    ; save ptr
@@ -539,9 +531,9 @@ func buildWriteStr() []byte {
 		0x48, 0x89, 0xC1,
 		// .loop: cmp byte[rcx], 0; je .done; inc rcx; jmp .loop
 		0x80, 0x39, 0x00, // cmp byte[rcx], 0
-		0x74, 0x05,       // je .done (+5): after-je=12, .done=17, rel=5
+		0x74, 0x05,       // je .done (+5)
 		0x48, 0xFF, 0xC1, // inc rcx
-		0xEB, 0xF6,       // jmp .loop (-10): after-jmp=17, .loop=7, rel=-10
+		0xEB, 0xF6,       // jmp .loop (-10)
 		// .done: rdx = rcx - rbx  (length)
 		0x48, 0x89, 0xCA,             // mov rdx, rcx
 		0x48, 0x29, 0xDA,             // sub rdx, rbx
@@ -549,38 +541,42 @@ func buildWriteStr() []byte {
 		0x48, 0x89, 0xDE,             // mov rsi, rbx
 		// write(1, rsi, rdx)
 		0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1
-		0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
-		0x0F, 0x05,                   // syscall
-		// pop rbx; ret
-		0x5B, 0xC3,
 	}
+	b = append(b, 0xB8)
+	b = binary.LittleEndian.AppendUint32(b, sc.write)
+	return append(b, 0x0F, 0x05, 0x5B, 0xC3) // syscall; pop rbx; ret
 }
 
 // write_bool: write "true" or "false" for rax (0=false, non-zero=true).
-func buildWriteBool() []byte {
+// The jump offsets are independent of the syscall number (mov eax always 5 bytes).
+func buildWriteBool(sc sysCalls) []byte {
+	wn := sc.write
+	// mov eax, wn bytes (4 bytes LE).
+	w := [4]byte{}
+	binary.LittleEndian.PutUint32(w[:], wn)
 	return []byte{
 		// sub rsp, 8
 		0x48, 0x83, 0xEC, 0x08,
 		// test rax, rax
 		0x48, 0x85, 0xC0,
-		// jz .false (+29): target=38, after-jz=9, rel=38-9=29=0x1D
+		// jz .false (+29): target=38, after-jz=9, rel=29
 		0x74, 0x1D,
 		// write "true" (4 bytes)
 		0xC7, 0x04, 0x24, 't', 'r', 'u', 'e', // mov dword[rsp], "true"
 		0xBF, 0x01, 0x00, 0x00, 0x00,         // mov edi, 1
 		0x48, 0x89, 0xE6,                     // mov rsi, rsp
 		0xBA, 0x04, 0x00, 0x00, 0x00,         // mov edx, 4
-		0xB8, 0x01, 0x00, 0x00, 0x00,         // mov eax, 1
+		0xB8, w[0], w[1], w[2], w[3],         // mov eax, sc.write
 		0x0F, 0x05,                           // syscall
-		// jmp .done (+32): target=70, after-jmp=38, rel=70-38=32=0x20
-		0xEB, 0x20,                           // jmp .done
+		// jmp .done (+32): target=70, after-jmp=38, rel=32
+		0xEB, 0x20,
 		// .false: write "false" (5 bytes)
 		0xC7, 0x04, 0x24, 'f', 'a', 'l', 's', // "fals"
 		0xC6, 0x44, 0x24, 0x04, 'e',          // byte[rsp+4]='e'
 		0xBF, 0x01, 0x00, 0x00, 0x00,
 		0x48, 0x89, 0xE6,
 		0xBA, 0x05, 0x00, 0x00, 0x00,
-		0xB8, 0x01, 0x00, 0x00, 0x00,
+		0xB8, w[0], w[1], w[2], w[3],         // mov eax, sc.write
 		0x0F, 0x05,
 		// .done:
 		0x48, 0x83, 0xC4, 0x08, // add rsp, 8
@@ -589,34 +585,47 @@ func buildWriteBool() []byte {
 }
 
 // writeln: write newline to stdout.
-func buildWriteln() []byte {
-	return []byte{
+func buildWriteln(sc sysCalls) []byte {
+	b := []byte{
 		0x48, 0x83, 0xEC, 0x08,             // sub rsp, 8
 		0xC6, 0x04, 0x24, '\n',             // mov byte[rsp], '\n'
 		0xBF, 0x01, 0x00, 0x00, 0x00,       // mov edi, 1
 		0x48, 0x89, 0xE6,                   // mov rsi, rsp
 		0xBA, 0x01, 0x00, 0x00, 0x00,       // mov edx, 1
-		0xB8, 0x01, 0x00, 0x00, 0x00,       // mov eax, 1
+	}
+	b = append(b, 0xB8)
+	b = binary.LittleEndian.AppendUint32(b, sc.write)
+	return append(b,
 		0x0F, 0x05,                         // syscall
 		0x48, 0x83, 0xC4, 0x08,             // add rsp, 8
 		0xC3,
-	}
+	)
 }
 
 // read_int: read a decimal integer from stdin, store result at address in rax.
-func buildReadInt() []byte {
+// The SYS_read setup uses xor rax,rax (3 bytes) on Linux (syscall=0) or
+// mov eax, 0x2000003 (5 bytes) on macOS. Relative jump offsets are unchanged
+// because both the jump instructions and their targets shift by the same delta.
+func buildReadInt(sc sysCalls) []byte {
 	// On entry: rax = pointer to int64 variable.
 	// Reads ASCII digits from stdin, parses, stores.
-	return []byte{
+	b := []byte{
 		// push rbx; push r12; push r13
 		0x53, 0x41, 0x54, 0x41, 0x55,
 		// r12 = target pointer
 		0x49, 0x89, 0xC4,
 		// sub rsp, 32  (read buffer at rsp)
 		0x48, 0x83, 0xEC, 0x20,
-		// read(0, rsp, 20)
-		0x48, 0x31, 0xC0,               // xor rax, rax (SYS_read=0)
-		0x48, 0x31, 0xFF,               // xor rdi, rdi
+	}
+	// read(0, rsp, 20) — syscall setup varies by OS.
+	if sc.read == 0 {
+		b = append(b, 0x48, 0x31, 0xC0) // xor rax, rax  (Linux SYS_read = 0)
+	} else {
+		b = append(b, 0xB8)
+		b = binary.LittleEndian.AppendUint32(b, sc.read)
+	}
+	b = append(b,
+		0x48, 0x31, 0xFF,               // xor rdi, rdi (fd=stdin=0)
 		0x48, 0x89, 0xE6,               // mov rsi, rsp
 		0xBA, 20, 0, 0, 0,              // mov edx, 20
 		0x0F, 0x05,                     // syscall → rax=count
@@ -628,16 +637,15 @@ func buildReadInt() []byte {
 		0x48, 0x31, 0xC9,               // xor rcx, rcx
 		// .loop: if rcx >= r13, break
 		0x4C, 0x39, 0xE9,               // cmp rcx, r13
-		// jae .done (+29): target=71, after-jae=42, rel=71-42=29=0x1D
+		// jae .done: both jae and target shift equally for macOS variant,
+		// so the relative offset 0x1D is correct for both Linux and macOS.
 		0x73, 0x1D,                     // jae .done
 		// al = buf[rcx]
-		0x0F, 0xB6, 0x04, 0x0E,         // movzx eax, byte[rsi+rcx]  (rsi=rsp)
+		0x0F, 0xB6, 0x04, 0x0E,         // movzx eax, byte[rsi+rcx]
 		// if al < '0' || al > '9': break
 		0x3C, '0',                      // cmp al, '0'
-		// jb .done (+21): target=71, after-jb=50, rel=71-50=21=0x15
 		0x72, 0x15,                     // jb .done
 		0x3C, '9',                      // cmp al, '9'
-		// ja .done (+17): target=71, after-ja=54, rel=71-54=17=0x11
 		0x77, 0x11,                     // ja .done
 		// rbx = rbx*10 + (al-'0')
 		0x48, 0x6B, 0xDB, 0x0A,         // imul rbx, rbx, 10
@@ -655,32 +663,39 @@ func buildReadInt() []byte {
 		0x41, 0x5C,                     // pop r12
 		0x5B,                           // pop rbx
 		0xC3,
-	}
+	)
+	return b
 }
 
 // read_str: read a line from stdin, store null-terminated at address in rax.
-func buildReadStr() []byte {
-	return []byte{
+func buildReadStr(sc sysCalls) []byte {
+	b := []byte{
 		0x53,                               // push rbx
 		0x48, 0x89, 0xC3,                   // mov rbx, rax
-		0x48, 0x31, 0xC0,                   // xor rax, rax
-		0x48, 0x31, 0xFF,                   // xor rdi, rdi
+	}
+	if sc.read == 0 {
+		b = append(b, 0x48, 0x31, 0xC0)    // xor rax, rax  (Linux SYS_read = 0)
+	} else {
+		b = append(b, 0xB8)
+		b = binary.LittleEndian.AppendUint32(b, sc.read)
+	}
+	return append(b,
+		0x48, 0x31, 0xFF,                   // xor rdi, rdi (fd=stdin=0)
 		0x48, 0x89, 0xDE,                   // mov rsi, rbx
 		0xBA, 0xFE, 0, 0, 0,                // mov edx, 254
 		0x0F, 0x05,                         // syscall → rax=count
 		0x48, 0x01, 0xD8,                   // add rax, rbx
 		0xC6, 0x00, 0x00,                   // mov byte[rax], 0
-		0x5B, 0xC3,
-	}
+		0x5B, 0xC3,                         // pop rbx; ret
+	)
 }
 
 // halt: exit(0).
-func buildHalt() []byte {
-	return []byte{
-		0xBF, 0x00, 0x00, 0x00, 0x00,       // mov edi, 0
-		0xB8, 0x3C, 0x00, 0x00, 0x00,       // mov eax, 60
-		0x0F, 0x05,
-	}
+func buildHalt(sc sysCalls) []byte {
+	b := []byte{0xBF, 0x00, 0x00, 0x00, 0x00} // mov edi, 0
+	b = append(b, 0xB8)
+	b = binary.LittleEndian.AppendUint32(b, sc.exit)
+	return append(b, 0x0F, 0x05) // syscall
 }
 
 // ---- low-level emit helpers ----
